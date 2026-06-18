@@ -1,0 +1,17 @@
+[package]
+name = "imu-gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+imu-core = { path = "../imu-core" }
+imu-transport = { path = "../imu-transport" }
+eframe = "0.28"
+egui = "0.28"
+egui_plot = "0.28"
+tokio = { workspace = true }
+env_logger = { workspace = true }
+
+[[bin]]
+name = "imu-gui"
+path = "src/main.rs"

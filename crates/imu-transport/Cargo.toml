@@ -1,0 +1,24 @@
+[package]
+name = "imu-transport"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+imu-core = { path = "../imu-core" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[features]
+default = ["serial"]
+serial = ["dep:serialport"]
+ble = ["dep:btleplug"]
+
+[dependencies.serialport]
+version = "4.3"
+optional = true
+
+[dependencies.btleplug]
+version = "0.11"
+optional = true
