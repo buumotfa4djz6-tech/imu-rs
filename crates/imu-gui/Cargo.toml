@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 imu-core = { path = "../imu-core" }
-imu-transport = { path = "../imu-transport" }
+imu-transport = { path = "../imu-transport", features = ["serial", "ble"] }
 eframe = "0.28"
 egui = "0.28"
 egui_plot = "0.28"

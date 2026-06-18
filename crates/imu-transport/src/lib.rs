@@ -14,3 +14,6 @@ pub use device::*;
 
 #[cfg(feature = "serial")]
 pub use serial::*;
+
+#[cfg(feature = "ble")]
+pub use ble::*;
