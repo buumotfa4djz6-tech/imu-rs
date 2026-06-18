@@ -11,3 +11,6 @@ pub mod ble;
 pub use transport::*;
 pub use mock::*;
 pub use device::*;
+
+#[cfg(feature = "serial")]
+pub use serial::*;
