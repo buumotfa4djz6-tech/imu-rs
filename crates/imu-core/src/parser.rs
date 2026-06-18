@@ -1,5 +1,5 @@
 use crate::types::*;
-use crate::error::ParseError;
+use crate::error::ProtocolError;
 
 // Scale factors
 const SCALE_ACCEL: f32 = 0.004_785_156;
@@ -11,13 +11,13 @@ const SCALE_HEIGHT: f32 = 0.001_072_883_6;
 const SCALE_QUAT: f32 = 0.000_030_517_578;
 const SCALE_ANGLE: f32 = 0.005_493_164;
 
-pub fn parse_imu_reading(data: &[u8]) -> Result<ImuReading, ParseError> {
+pub fn parse_imu_reading(data: &[u8]) -> Result<ImuReading, ProtocolError> {
     if data.len() < 7 {
-        return Err(ParseError::TooShort(data.len()));
+        return Err(ProtocolError::TooShort { expected: 7, actual: data.len() });
     }
 
     if data[0] != 0x11 {
-        return Err(ParseError::InvalidHeader(data[0]));
+        return Err(ProtocolError::InvalidHeader { expected: 0x11, actual: data[0] });
     }
 
     let ctl = u16::from_le_bytes([data[1], data[2]]);
@@ -121,9 +121,9 @@ pub fn parse_imu_reading(data: &[u8]) -> Result<ImuReading, ParseError> {
     Ok(reading)
 }
 
-fn check_len(data: &[u8], pos: usize, needed: usize) -> Result<(), ParseError> {
+fn check_len(data: &[u8], pos: usize, needed: usize) -> Result<(), ProtocolError> {
     if pos + needed > data.len() {
-        Err(ParseError::Truncated {
+        Err(ProtocolError::Truncated {
             expected: pos + needed,
             actual: data.len(),
         })
@@ -132,7 +132,7 @@ fn check_len(data: &[u8], pos: usize, needed: usize) -> Result<(), ParseError> {
     }
 }
 
-fn read_vec3_scaled(data: &[u8], pos: &mut usize, scale: f32) -> Result<Vec3, ParseError> {
+fn read_vec3_scaled(data: &[u8], pos: &mut usize, scale: f32) -> Result<Vec3, ProtocolError> {
     check_len(data, *pos, 6)?;
     let x = read_i16(data, *pos) as f32 * scale;
     let y = read_i16(data, *pos + 2) as f32 * scale;
@@ -141,7 +141,7 @@ fn read_vec3_scaled(data: &[u8], pos: &mut usize, scale: f32) -> Result<Vec3, Pa
     Ok(Vec3 { x, y, z })
 }
 
-fn read_vec3_mm(data: &[u8], pos: &mut usize) -> Result<Vec3, ParseError> {
+fn read_vec3_mm(data: &[u8], pos: &mut usize) -> Result<Vec3, ProtocolError> {
     check_len(data, *pos, 6)?;
     let x = read_i16(data, *pos) as f32 / 1000.0;
     let y = read_i16(data, *pos + 2) as f32 / 1000.0;
@@ -150,7 +150,7 @@ fn read_vec3_mm(data: &[u8], pos: &mut usize) -> Result<Vec3, ParseError> {
     Ok(Vec3 { x, y, z })
 }
 
-fn read_quat_scaled(data: &[u8], pos: &mut usize, scale: f32) -> Result<Quat4, ParseError> {
+fn read_quat_scaled(data: &[u8], pos: &mut usize, scale: f32) -> Result<Quat4, ProtocolError> {
     check_len(data, *pos, 8)?;
     let w = read_i16(data, *pos) as f32 * scale;
     let x = read_i16(data, *pos + 2) as f32 * scale;
@@ -303,19 +303,19 @@ mod tests {
     fn test_error_handling() {
         // 空帧
         let data = vec![];
-        assert!(matches!(parse_imu_reading(&data), Err(ParseError::TooShort(0))));
+        assert!(matches!(parse_imu_reading(&data), Err(ProtocolError::TooShort { expected: 7, actual: 0 })));
 
         // 太短（少于 7 字节）
         let data = vec![0x11, 0x01, 0x00];
-        assert!(matches!(parse_imu_reading(&data), Err(ParseError::TooShort(3))));
+        assert!(matches!(parse_imu_reading(&data), Err(ProtocolError::TooShort { expected: 7, actual: 3 })));
 
         // 错误的头字节
         let data = vec![0x12, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
-        assert!(matches!(parse_imu_reading(&data), Err(ParseError::InvalidHeader(0x12))));
+        assert!(matches!(parse_imu_reading(&data), Err(ProtocolError::InvalidHeader { expected: 0x11, actual: 0x12 })));
 
         // 截断帧（声明了 acceleration 但数据不够）
         let data = vec![0x11, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE8, 0x03];
-        assert!(matches!(parse_imu_reading(&data), Err(ParseError::Truncated { .. })));
+        assert!(matches!(parse_imu_reading(&data), Err(ProtocolError::Truncated { .. })));
     }
 
     #[test]
