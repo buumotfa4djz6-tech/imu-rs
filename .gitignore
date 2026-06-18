@@ -1,0 +1,31 @@
+# Dependencies
+/Cargo.lock
+**/target/
+
+# Build artifacts
+**/*.exe
+**/*.dll
+**/*.so
+**/*.dylib
+
+# Testing
+**/debug/
+**/release/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local

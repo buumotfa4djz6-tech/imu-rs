@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "crates/imu-core",
+    "crates/imu-transport", 
+    "crates/imu-gui"
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["buumotfa4djz6-tech"]
+license = "MIT"
+repository = "https://github.com/buumotfa4djz6-tech/imu-rs"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.10"
+
+# Serialization (if needed later)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
