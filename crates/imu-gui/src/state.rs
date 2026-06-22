@@ -28,6 +28,7 @@ pub struct ImuApp {
     pub scanning_ble: bool,
     pub ble_discovery_rx: Option<mpsc::Receiver<BleDeviceEvent>>,
     pub ble_stop_tx: Option<oneshot::Sender<()>>,
+    pub ble_filter: String,  // Filter by device name or MAC address
     
     // Status
     pub status_message: String,
@@ -82,6 +83,7 @@ impl Default for ImuApp {
             scanning_ble: false,
             ble_discovery_rx: None,
             ble_stop_tx: None,
+            ble_filter: String::new(),
             status_message: "Ready".to_string(),
             battery_level: None,
             rt: tokio::runtime::Runtime::new().unwrap(),

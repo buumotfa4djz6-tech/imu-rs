@@ -48,7 +48,7 @@ impl ImuApp {
                 });
             }
             ConnectionType::Ble => {
-                ui.label("BLE Devices (IM948):");
+                ui.label("BLE Devices:");
                 
                 // Scan/Stop button
                 if self.scanning_ble {
@@ -59,11 +59,18 @@ impl ImuApp {
                     self.start_ble_discovery(ctx);
                 }
                 ui.add_space(5.0);
+                
+                // Filter input
+                ui.horizontal(|ui| {
+                    ui.label("Filter:");
+                    ui.text_edit_singleline(&mut self.ble_filter);
+                });
+                ui.add_space(5.0);
 
                 if self.scanning_ble {
                     ui.colored_label(egui::Color32::GREEN, "Scanning...");
                 } else if self.ble_devices.is_empty() {
-                    ui.label("No IM948 devices found");
+                    ui.label("No BLE devices found");
                 }
                 
                 // Sort devices by RSSI (strongest first), then by name
@@ -77,6 +84,18 @@ impl ImuApp {
                         (None, None) => a.name.cmp(&b.name),
                     }
                 });
+                
+                // Apply filter
+                let filter_lower = self.ble_filter.to_lowercase();
+                if !filter_lower.is_empty() {
+                    devices.retain(|device| {
+                        let name_match = device.name.as_ref()
+                            .map(|n| n.to_lowercase().contains(&filter_lower))
+                            .unwrap_or(false);
+                        let addr_match = device.address.to_lowercase().contains(&filter_lower);
+                        name_match || addr_match
+                    });
+                }
 
                 if !devices.is_empty() {
                     ui.label(format!("{} device(s) found:", devices.len()));
@@ -97,6 +116,8 @@ impl ImuApp {
                             }
                         }
                     });
+                } else if !filter_lower.is_empty() {
+                    ui.label("No devices match the filter");
                 }
             }
         }
