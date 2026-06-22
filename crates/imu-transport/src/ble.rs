@@ -58,8 +58,13 @@ impl BleManager {
         // Clear previously discovered peripherals
         self.discovered_peripherals.lock().await.clear();
 
-        // Start scanning
-        central.start_scan(ScanFilter::default())
+        // Start scanning with service UUID filter for IM948
+        let service_uuid = Uuid::parse_str(IM948_SERVICE_UUID)
+            .map_err(|e| TransportError::ConnectionFailed(format!("Invalid service UUID: {}", e)))?;
+        
+        central.start_scan(ScanFilter {
+            services: vec![service_uuid],
+        })
             .await
             .map_err(|e| TransportError::ConnectionFailed(format!("Failed to start scan: {}", e)))?;
 
@@ -85,17 +90,22 @@ impl BleManager {
                 .map_err(|e| TransportError::ConnectionFailed(format!("Failed to get properties: {}", e)))?;
 
             if let Some(props) = properties {
-                let name = props.local_name.clone();
-                let address = props.address.to_string();
-                let rssi = props.rssi;
+                // Only include devices that have the IM948 service
+                let has_im948_service = props.services.iter().any(|uuid| uuid.to_string() == IM948_SERVICE_UUID);
+                
+                if has_im948_service {
+                    let name = props.local_name.clone();
+                    let address = props.address.to_string();
+                    let rssi = props.rssi;
 
-                devices.push(BleDeviceInfo {
-                    name,
-                    address,
-                    rssi,
-                });
+                    devices.push(BleDeviceInfo {
+                        name,
+                        address,
+                        rssi,
+                    });
 
-                discovered_list.push(peripheral);
+                    discovered_list.push(peripheral);
+                }
             }
         }
 

@@ -1,0 +1,93 @@
+use imu_core::ImuReading;
+use imu_transport::{BleDeviceInfo, BleManager};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex as TokioMutex};
+
+use crate::types::*;
+
+/// Application state
+pub struct ImuApp {
+    // Connection state
+    pub connection_type: ConnectionType,
+    pub is_connected: bool,
+    
+    // Channels for async communication
+    pub data_rx: Option<mpsc::Receiver<ImuReading>>,
+    pub command_tx: Option<mpsc::Sender<DeviceCommand>>,
+    
+    // Serial port state
+    pub serial_ports: Vec<String>,
+    pub selected_serial_port: Option<String>,
+    pub baud_rate: u32,
+    
+    // BLE state
+    pub ble_manager: Option<Arc<TokioMutex<BleManager>>>,
+    pub ble_devices: Vec<BleDeviceInfo>,
+    pub selected_ble_device: Option<String>,
+    pub scanning_ble: bool,
+    
+    // Status
+    pub status_message: String,
+    pub battery_level: Option<u8>,
+    
+    // Runtime for async operations
+    pub rt: tokio::runtime::Runtime,
+    
+    // Data visualization (Slice 7)
+    pub accel_buffer: VecDeque<(f64, f64, f64)>,  // (x, y, z) acceleration data
+    pub gyro_buffer: VecDeque<(f64, f64, f64)>,   // (x, y, z) gyroscope data
+    pub mag_buffer: VecDeque<(f64, f64, f64)>,    // (x, y, z) magnetometer data
+    pub data_buffer_len: usize,
+    pub last_timestamp: u32,
+    
+    // Configuration (Slice 8)
+    pub config_report_rate: u16,
+    pub config_accel_range: u8,
+    pub config_gyro_range: u8,
+    pub config_mag_range: u8,
+    pub config_filter_level: u8,
+    pub config_modified: bool,
+    
+    // Calibration state
+    pub calibrating_accel: bool,
+    pub calibrating_gyro: bool,
+    pub calibrating_mag: bool,
+    pub calibration_status: String,
+}
+
+impl Default for ImuApp {
+    fn default() -> Self {
+        Self {
+            connection_type: ConnectionType::Serial,
+            is_connected: false,
+            data_rx: None,
+            command_tx: None,
+            serial_ports: Vec::new(),
+            selected_serial_port: None,
+            baud_rate: 115200,
+            ble_manager: None,
+            ble_devices: Vec::new(),
+            selected_ble_device: None,
+            scanning_ble: false,
+            status_message: "Ready".to_string(),
+            battery_level: None,
+            rt: tokio::runtime::Runtime::new().unwrap(),
+            accel_buffer: VecDeque::with_capacity(1000),
+            gyro_buffer: VecDeque::with_capacity(1000),
+            mag_buffer: VecDeque::with_capacity(1000),
+            data_buffer_len: 1000,
+            last_timestamp: 0,
+            config_report_rate: 100,
+            config_accel_range: 2,
+            config_gyro_range: 4,
+            config_mag_range: 3,
+            config_filter_level: 2,
+            config_modified: false,
+            calibrating_accel: false,
+            calibrating_gyro: false,
+            calibrating_mag: false,
+            calibration_status: String::new(),
+        }
+    }
+}

@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Architecture review — imu-rs GUI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      .seam { stroke-dasharray: 4 4; }
+      .leak { stroke: #dc2626; }
+      .deep { background: linear-gradient(135deg, #0f172a, #1e293b); }
+      .badge-strong { background: #059669; }
+      .badge-explore { background: #d97706; }
+      .badge-spec { background: #64748b; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans">
+    <main class="max-w-5xl mx-auto px-6 py-12 space-y-12">
+      <header class="space-y-4">
+        <h1 class="text-4xl font-bold text-slate-900">Architecture Review: imu-rs GUI</h1>
+        <p class="text-sm text-slate-600">2026-06-22 · imu-gui crate</p>
+        <div class="flex gap-4 text-xs">
+          <div class="flex items-center gap-2">
+            <div class="w-4 h-4 border-2 border-slate-400"></div>
+            <span>Module</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="w-4 h-0 border-t-2 border-dashed border-slate-400"></div>
+            <span>Seam</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <svg class="w-4 h-4" viewBox="0 0 20 20"><line x1="0" y1="10" x2="20" y2="10" stroke="#dc2626" stroke-width="2"/></svg>
+            <span>Leakage</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="w-4 h-4 deep"></div>
+            <span>Deep module</span>
+          </div>
+        </div>
+      </header>
+
+      <section id="candidates" class="space-y-10">
+        
+        <article class="bg-white rounded-lg shadow-md p-8 space-y-6">
+          <div class="flex items-start justify-between">
+            <h2 class="text-2xl font-bold text-slate-900">Collapse the God Object</h2>
+            <div class="flex gap-2">
+              <span class="badge-strong text-white text-xs font-semibold px-3 py-1 rounded-full">Strong</span>
+              <span class="bg-slate-200 text-slate-700 text-xs font-semibold px-3 py-1 rounded-full">in-process</span>
+            </div>
+          </div>
+          
+          <div class="space-y-2">
+            <h3 class="text-sm font-semibold text-slate-700">Files</h3>
+            <div class="font-mono text-sm text-slate-600 space-y-1">
+              <div>crates/imu-gui/src/main.rs (993 lines)</div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-6">
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700 mb-3">Before: Shallow interface, everything exposed</h3>
+              <div class="bg-slate-100 rounded-lg p-4 space-y-3">
+                <div class="bg-white border-2 border-slate-300 rounded p-3">
+                  <div class="text-xs font-semibold text-slate-700 mb-2">ImuApp (interface)</div>
+                  <div class="space-y-1 text-xs text-slate-600">
+                    <div>· connection_type: ConnectionType</div>
+                    <div>· is_connected: bool</div>
+                    <div>· data_rx: Option&lt;Receiver&gt;</div>
+                    <div>· command_tx: Option&lt;Sender&gt;</div>
+                    <div>· serial_ports: Vec&lt;String&gt;</div>
+                    <div>· selected_serial_port: Option</div>
+                    <div>· baud_rate: u32</div>
+                    <div>· ble_manager: Arc&lt;Mutex&gt;</div>
+                    <div>· ble_devices: Vec&lt;BleDeviceInfo&gt;</div>
+                    <div>· selected_ble_device: Option</div>
+                    <div>· scanning_ble: bool</div>
+                    <div>· status_message: String</div>
+                    <div>· battery_level: Option&lt;u8&gt;</div>
+                    <div>· accel_buffer: VecDeque</div>
+                    <div>· gyro_buffer: VecDeque</div>
+                    <div>· mag_buffer: VecDeque</div>
+                    <div class="text-slate-400">... 10+ more fields</div>
+                  </div>
+                </div>
+                <div class="text-center text-slate-400 text-xs">↓</div>
+                <div class="bg-slate-200 border-2 border-slate-400 rounded p-3">
+                  <div class="text-xs font-semibold text-slate-700 mb-2">Implementation (993 lines)</div>
+                  <div class="space-y-1 text-xs text-slate-600">
+                    <div>· UI state management</div>
+                    <div>· Connection logic (Serial + BLE)</div>
+                    <div>· Background task</div>
+                    <div>· Data processing</div>
+                    <div>· Command encoding</div>
+                    <div>· Plot rendering</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700 mb-3">After: Deep modules, hidden complexity</h3>
+              <div class="bg-slate-100 rounded-lg p-4 space-y-3">
+                <div class="deep border-2 border-slate-700 rounded p-3">
+                  <div class="text-xs font-semibold text-white mb-2">ConnectionManager (interface)</div>
+                  <div class="space-y-1 text-xs text-slate-300">
+                    <div>· connect(device_info) → Result</div>
+                    <div>· disconnect() → Result</div>
+                    <div>· is_connected() → bool</div>
+                    <div>· scan() → Vec&lt;DeviceInfo&gt;</div>
+                  </div>
+                  <div class="mt-3 pt-3 border-t border-slate-600 text-xs text-slate-400">
+                    <div class="italic">Hides: Serial/BLE details, channel setup, background task</div>
+                  </div>
+                </div>
+                <div class="text-center text-slate-400 text-xs">↓</div>
+                <div class="deep border-2 border-slate-700 rounded p-3">
+                  <div class="text-xs font-semibold text-white mb-2">DataPipeline (interface)</div>
+                  <div class="space-y-1 text-xs text-slate-300">
+                    <div>· try_recv() → Option&lt;Reading&gt;</div>
+                    <div>· get_buffers() → &Buffers</div>
+                  </div>
+                  <div class="mt-3 pt-3 border-t border-slate-600 text-xs text-slate-400">
+                    <div class="italic">Hides: backpressure, channel consumption, data transformation</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-3">
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700">Problem</h3>
+              <p class="text-sm text-slate-600">ImuApp exposes 20+ fields, mixing connection state, data buffers, and UI flags — interface is nearly as complex as implementation.</p>
+            </div>
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700">Solution</h3>
+              <p class="text-sm text-slate-600">Extract ConnectionManager, DataPipeline, and DeviceController as deep modules with minimal interfaces.</p>
+            </div>
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700">Wins</h3>
+              <ul class="text-sm text-slate-600 space-y-1 list-disc list-inside">
+                <li>Locality: connection bugs concentrate in one module</li>
+                <li>Leverage: 4 methods replace 20+ exposed fields</li>
+                <li>Testability: mock ConnectionManager without UI</li>
+                <li>Delete 800 lines from main.rs</li>
+              </ul>
+            </div>
+          </div>
+        </article>
+
+        <article class="bg-white rounded-lg shadow-md p-8 space-y-6">
+          <div class="flex items-start justify-between">
+            <h2 class="text-2xl font-bold text-slate-900">Unify Serial and BLE Connection Logic</h2>
+            <div class="flex gap-2">
+              <span class="badge-strong text-white text-xs font-semibold px-3 py-1 rounded-full">Strong</span>
+              <span class="bg-slate-200 text-slate-700 text-xs font-semibold px-3 py-1 rounded-full">ports & adapters</span>
+            </div>
+          </div>
+          
+          <div class="space-y-2">
+            <h3 class="text-sm font-semibold text-slate-700">Files</h3>
+            <div class="font-mono text-sm text-slate-600 space-y-1">
+              <div>crates/imu-gui/src/main.rs:270-360 (connect method)</div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-6">
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700 mb-3">Before: Duplicated connection logic</h3>
+              <div class="bg-slate-100 rounded-lg p-4 space-y-2">
+                <div class="bg-white border-2 border-slate-300 rounded p-3">
+                  <div class="text-xs font-semibold text-slate-700 mb-2">match connection_type</div>
+                  <div class="space-y-3 text-xs text-slate-600">
+                    <div>
+                      <div class="font-semibold text-slate-700">Serial branch (30 lines):</div>
+                      <div class="pl-2 space-y-1">
+                        <div>· create channels</div>
+                        <div>· create SerialTransport</div>
+                        <div>· spawn background task</div>
+                        <div>· store state</div>
+                      </div>
+                    </div>
+                    <div>
+                      <div class="font-semibold text-slate-700">BLE branch (35 lines):</div>
+                      <div class="pl-2 space-y-1">
+                        <div>· create channels</div>
+                        <div>· get peripheral from manager</div>
+                        <div>· create BleTransport</div>
+                        <div>· connect with peripheral</div>
+                        <div>· spawn background task</div>
+                        <div>· store state</div>
+                      </div>
+                    </div>
+                    <div class="text-slate-400 italic">~80% duplicated</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700 mb-3">After: One adapter per transport</h3>
+              <div class="bg-slate-100 rounded-lg p-4 space-y-2">
+                <div class="deep border-2 border-slate-700 rounded p-3">
+                  <div class="text-xs font-semibold text-white mb-2">ConnectionManager</div>
+                  <div class="space-y-3 text-xs text-slate-300 mt-3">
+                    <div>
+                      <div class="font-semibold text-white">connect(device_info):</div>
+                      <div class="pl-2 space-y-1">
+                        <div>· match device_info.transport_type</div>
+                        <div>· create appropriate transport adapter</div>
+                        <div>· spawn background task (once)</div>
+                        <div>· store command_tx</div>
+                      </div>
+                    </div>
+                    <div class="pt-3 border-t border-slate-600">
+                      <div class="text-xs text-slate-400 italic">Transport adapters: SerialTransport, BleTransport</div>
+                      <div class="text-xs text-slate-400 italic">Both implement Transport trait</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-3">
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700">Problem</h3>
+              <p class="text-sm text-slate-600">Serial and BLE connection branches duplicate channel creation, task spawning, and state management — adding a third transport type means copying 30 lines.</p>
+            </div>
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700">Solution</h3>
+              <p class="text-sm text-slate-600">ConnectionManager owns the connection logic; transport type is a parameter, not a branch.</p>
+            </div>
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700">Wins</h3>
+              <ul class="text-sm text-slate-600 space-y-1 list-disc list-inside">
+                <li>Delete 60 lines of duplication</li>
+                <li>Leverage: add transport without touching UI</li>
+                <li>Locality: connection bugs in one place</li>
+              </ul>
+            </div>
+          </div>
+        </article>
+
+        <article class="bg-white rounded-lg shadow-md p-8 space-y-6">
+          <div class="flex items-start justify-between">
+            <h2 class="text-2xl font-bold text-slate-900">Split UI into Independent Panels</h2>
+            <div class="flex gap-2">
+              <span class="badge-explore text-white text-xs font-semibold px-3 py-1 rounded-full">Worth exploring</span>
+              <span class="bg-slate-200 text-slate-700 text-xs font-semibold px-3 py-1 rounded-full">in-process</span>
+            </div>
+          </div>
+          
+          <div class="space-y-2">
+            <h3 class="text-sm font-semibold text-slate-700">Files</h3>
+            <div class="font-mono text-sm text-slate-600 space-y-1">
+              <div>crates/imu-gui/src/main.rs:548-900 (update method)</div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-6">
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700 mb-3">Before: One 400-line update method</h3>
+              <div class="bg-slate-100 rounded-lg p-4 space-y-2">
+                <div class="bg-white border-2 border-slate-300 rounded p-3">
+                  <div class="text-xs font-semibold text-slate-700 mb-2">ImuApp::update (400 lines)</div>
+                  <div class="space-y-1 text-xs text-slate-600">
+                    <div>· Top menu bar (20 lines)</div>
+                    <div>· Bottom status bar (20 lines)</div>
+                    <div>· Left panel: Device Discovery (80 lines)</div>
+                    <div>· Right panel: Configuration (150 lines)</div>
+                    <div>· Central panel: Data Visualization (130 lines)</div>
+                  </div>
+                  <div class="mt-3 pt-3 border-t border-slate-200 text-xs text-slate-400">
+                    All panels borrow self mutably, causing borrow checker friction
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700 mb-3">After: Each panel is a function</h3>
+              <div class="bg-slate-100 rounded-lg p-4 space-y-2">
+                <div class="deep border-2 border-slate-700 rounded p-3">
+                  <div class="text-xs font-semibold text-white mb-2">ui/ module</div>
+                  <div class="space-y-2 text-xs text-slate-300">
+                    <div>
+                      <div class="font-semibold text-white">mod device_panel</div>
+                      <div class="pl-2 text-slate-400">fn show(app: &mut ImuApp, ui: &Ui)</div>
+                    </div>
+                    <div>
+                      <div class="font-semibold text-white">mod config_panel</div>
+                      <div class="pl-2 text-slate-400">fn show(app: &mut ImuApp, ui: &Ui)</div>
+                    </div>
+                    <div>
+                      <div class="font-semibold text-white">mod data_panel</div>
+                      <div class="pl-2 text-slate-400">fn show(app: &mut ImuApp, ui: &Ui)</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="text-center text-slate-400 text-xs">↓</div>
+                <div class="bg-slate-200 border-2 border-slate-400 rounded p-3">
+                  <div class="text-xs font-semibold text-slate-700 mb-2">ImuApp::update (20 lines)</div>
+                  <div class="space-y-1 text-xs text-slate-600">
+                    <div>· consume data</div>
+                    <div>· device_panel::show(self, ui)</div>
+                    <div>· config_panel::show(self, ui)</div>
+                    <div>· data_panel::show(self, ui)</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-3">
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700">Problem</h3>
+              <p class="text-sm text-slate-600">update() is 400 lines, mixing menu rendering with connection logic with plot drawing — hard to find where a UI bug lives.</p>
+            </div>
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700">Solution</h3>
+              <p class="text-sm text-slate-600">Each panel becomes a function in a ui/ module; update() is a thin coordinator.</p>
+            </div>
+            <div>
+              <h3 class="text-sm font-semibold text-slate-700">Wins</h3>
+              <ul class="text-sm text-slate-600 space-y-1 list-disc list-inside">
+                <li>Locality: UI bugs concentrate in one panel</li>
+                <li>Leverage: reuse panels in other windows</li>
+                <li>update() shrinks from 400 → 20 lines</li>
+              </ul>
+            </div>
+          </div>
+        </article>
+
+      </section>
+
+      <section id="top-recommendation" class="bg-gradient-to-br from-emerald-50 to-teal-50 rounded-lg shadow-lg p-8 space-y-4">
+        <div class="flex items-start justify-between">
+          <h2 class="text-2xl font-bold text-slate-900">Top Recommendation: Collapse the God Object</h2>
+          <span class="badge-strong text-white text-xs font-semibold px-3 py-1 rounded-full">Start here</span>
+        </div>
+        <p class="text-sm text-slate-700">
+          The ImuApp struct is shallow — 20+ exposed fields, 993 lines in one file. Extracting ConnectionManager, DataPipeline, and DeviceController will delete 800 lines, concentrate bugs, and make the remaining code testable.
+        </p>
+        <a href="#candidate-1" class="inline-block text-emerald-700 hover:text-emerald-900 text-sm font-semibold">
+          See full analysis →
+        </a>
+      </section>
+
+    </main>
+  </body>
+</html>
