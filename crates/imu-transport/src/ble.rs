@@ -1,9 +1,10 @@
 use crate::transport::{Transport, TransportError};
 use async_trait::async_trait;
 use btleplug::api::{Central, Characteristic, Manager as _, Peripheral as _, ScanFilter};
-use btleplug::platform::{Manager, Peripheral};
+use btleplug::platform::{Adapter, Manager, Peripheral};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::Duration;
+use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
 // IM948 Custom Service and Characteristics
@@ -16,36 +17,24 @@ const IM948_NOTIFY_CHAR_UUID: &str = "0000ae02-0000-1000-8000-00805f9b34fb";
 pub struct BleDeviceInfo {
     pub name: Option<String>,
     pub address: String,
+    pub rssi: Option<i16>,
 }
 
-/// BLE transport implementation using btleplug
-pub struct BleTransport {
-    peripheral: Arc<Mutex<Option<Peripheral>>>,
-    write_char: Arc<Mutex<Option<Characteristic>>>,
-    notify_char: Arc<Mutex<Option<Characteristic>>>,
-    mac_address: String,
-    connected: bool,
+/// Global BLE manager to handle scanning and connection
+pub struct BleManager {
+    central: Option<Adapter>,
+    discovered_peripherals: Arc<Mutex<Vec<Peripheral>>>,
 }
 
-impl BleTransport {
-    /// Create a new BLE transport (does not connect yet)
-    pub fn new(mac_address: &str) -> Self {
+impl BleManager {
+    pub fn new() -> Self {
         Self {
-            peripheral: Arc::new(Mutex::new(None)),
-            write_char: Arc::new(Mutex::new(None)),
-            notify_char: Arc::new(Mutex::new(None)),
-            mac_address: mac_address.to_string(),
-            connected: false,
+            central: None,
+            discovered_peripherals: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    /// Get the MAC address
-    pub fn mac_address(&self) -> &str {
-        &self.mac_address
-    }
-
-    /// Discover available BLE devices
-    pub async fn discover_devices() -> Result<Vec<BleDeviceInfo>, TransportError> {
+    pub async fn init(&mut self) -> Result<(), TransportError> {
         let manager = Manager::new()
             .await
             .map_err(|e| TransportError::ConnectionFailed(format!("Failed to create manager: {}", e)))?;
@@ -58,83 +47,120 @@ impl BleTransport {
             return Err(TransportError::ConnectionFailed("No BLE adapters found".to_string()));
         }
 
-        let central = adapters.into_iter().next().unwrap();
-        
+        self.central = Some(adapters.into_iter().next().unwrap());
+        Ok(())
+    }
+
+    pub async fn scan(&self, duration_secs: u64) -> Result<Vec<BleDeviceInfo>, TransportError> {
+        let central = self.central.as_ref()
+            .ok_or_else(|| TransportError::ConnectionFailed("BLE manager not initialized".to_string()))?;
+
+        // Clear previously discovered peripherals
+        self.discovered_peripherals.lock().await.clear();
+
+        // Start scanning
         central.start_scan(ScanFilter::default())
             .await
             .map_err(|e| TransportError::ConnectionFailed(format!("Failed to start scan: {}", e)))?;
 
-        // Wait a bit for devices to be discovered
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        // Wait for specified duration
+        tokio::time::sleep(Duration::from_secs(duration_secs)).await;
 
+        // Stop scanning
+        central.stop_scan()
+            .await
+            .map_err(|e| TransportError::ConnectionFailed(format!("Failed to stop scan: {}", e)))?;
+
+        // Get discovered peripherals
         let peripherals = central.peripherals()
             .await
             .map_err(|e| TransportError::ConnectionFailed(format!("Failed to get peripherals: {}", e)))?;
 
         let mut devices = Vec::new();
+        let mut discovered_list = self.discovered_peripherals.lock().await;
+
         for peripheral in peripherals {
             let properties = peripheral.properties()
                 .await
                 .map_err(|e| TransportError::ConnectionFailed(format!("Failed to get properties: {}", e)))?;
 
             if let Some(props) = properties {
-                let name = props.local_name;
+                let name = props.local_name.clone();
                 let address = props.address.to_string();
-                
+                let rssi = props.rssi;
+
                 devices.push(BleDeviceInfo {
                     name,
                     address,
+                    rssi,
                 });
+
+                discovered_list.push(peripheral);
             }
         }
 
-        central.stop_scan()
-            .await
-            .map_err(|e| TransportError::ConnectionFailed(format!("Failed to stop scan: {}", e)))?;
-
         Ok(devices)
+    }
+
+    pub async fn get_peripheral(&self, address: &str) -> Option<Peripheral> {
+        let discovered = self.discovered_peripherals.lock().await;
+        for peripheral in discovered.iter() {
+            if peripheral.address().to_string() == address {
+                return Some(peripheral.clone());
+            }
+        }
+        None
     }
 }
 
-#[async_trait]
-impl Transport for BleTransport {
-    async fn connect(&mut self) -> Result<(), TransportError> {
+/// BLE transport implementation using btleplug
+pub struct BleTransport {
+    peripheral: Option<Peripheral>,
+    write_char: Option<Characteristic>,
+    notify_char: Option<Characteristic>,
+    mac_address: String,
+    connected: bool,
+    notification_receiver: Option<mpsc::Receiver<Vec<u8>>>,
+    notification_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl BleTransport {
+    /// Create a new BLE transport (does not connect yet)
+    pub fn new(mac_address: &str) -> Self {
+        Self {
+            peripheral: None,
+            write_char: None,
+            notify_char: None,
+            mac_address: mac_address.to_string(),
+            connected: false,
+            notification_receiver: None,
+            notification_task: None,
+        }
+    }
+
+    /// Get the MAC address
+    pub fn mac_address(&self) -> &str {
+        &self.mac_address
+    }
+
+    /// Connect to a peripheral from a BLE manager
+    pub async fn connect_with_peripheral(&mut self, peripheral: Peripheral) -> Result<(), TransportError> {
         if self.connected {
             return Ok(());
         }
 
-        let manager = Manager::new()
-            .await
-            .map_err(|e| TransportError::ConnectionFailed(format!("Failed to create manager: {}", e)))?;
-
-        let adapters = manager.adapters()
-            .await
-            .map_err(|e| TransportError::ConnectionFailed(format!("Failed to get adapters: {}", e)))?;
-
-        let central = adapters.into_iter().next()
-            .ok_or_else(|| TransportError::ConnectionFailed("No BLE adapter found".to_string()))?;
-
-        // Find the peripheral by MAC address
-        let peripherals = central.peripherals()
-            .await
-            .map_err(|e| TransportError::ConnectionFailed(format!("Failed to get peripherals: {}", e)))?;
-
-        let target_peripheral = peripherals.into_iter()
-            .find(|p| p.address().to_string() == self.mac_address)
-            .ok_or_else(|| TransportError::ConnectionFailed(format!("Device {} not found", self.mac_address)))?;
-
         // Connect to the peripheral
-        target_peripheral.connect()
+        peripheral.connect()
             .await
             .map_err(|e| TransportError::ConnectionFailed(format!("Failed to connect: {}", e)))?;
 
         // Discover services
-        target_peripheral.discover_services()
+        peripheral.discover_services()
             .await
             .map_err(|e| TransportError::ConnectionFailed(format!("Failed to discover services: {}", e)))?;
 
         // Find characteristics
-        let characteristics = target_peripheral.characteristics();
+        let characteristics = peripheral.characteristics();
 
         let service_uuid = Uuid::parse_str(IM948_SERVICE_UUID)
             .map_err(|e| TransportError::ConnectionFailed(format!("Invalid service UUID: {}", e)))?;
@@ -165,27 +191,81 @@ impl Transport for BleTransport {
             .ok_or_else(|| TransportError::ConnectionFailed("Notify characteristic not found".to_string()))?;
 
         // Subscribe to notifications
-        target_peripheral.subscribe(&notify_char)
+        peripheral.subscribe(&notify_char)
             .await
             .map_err(|e| TransportError::ConnectionFailed(format!("Failed to subscribe: {}", e)))?;
 
-        *self.peripheral.lock().await = Some(target_peripheral);
-        *self.write_char.lock().await = Some(write_char);
-        *self.notify_char.lock().await = Some(notify_char);
+        // Create a channel for receiving notifications
+        let (tx, rx) = mpsc::channel(100);
+
+        // Spawn a task to handle notifications
+        let peripheral_clone = peripheral.clone();
+        let notify_uuid_clone = notify_char.uuid;
+        let task_handle = tokio::spawn(async move {
+            let mut notifications = match peripheral_clone.notifications().await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    eprintln!("Failed to get notification stream: {}", e);
+                    return;
+                }
+            };
+
+            use futures::StreamExt;
+            while let Some(notification) = notifications.next().await {
+                if notification.uuid == notify_uuid_clone {
+                    if tx.send(notification.value).await.is_err() {
+                        // Receiver dropped, stop the task
+                        break;
+                    }
+                }
+            }
+        });
+
+        self.peripheral = Some(peripheral);
+        self.write_char = Some(write_char);
+        self.notify_char = Some(notify_char);
+        self.notification_receiver = Some(rx);
+        self.notification_task = Some(task_handle);
         self.connected = true;
 
         Ok(())
     }
+}
+
+impl Drop for BleTransport {
+    fn drop(&mut self) {
+        // Cancel the notification task when dropping
+        if let Some(task) = self.notification_task.take() {
+            task.abort();
+        }
+    }
+}
+
+#[async_trait]
+impl Transport for BleTransport {
+    async fn connect(&mut self) -> Result<(), TransportError> {
+        // This method should not be used directly for BLE
+        // Use connect_with_peripheral instead
+        Err(TransportError::ConnectionFailed(
+            "BLE transport requires connect_with_peripheral() - use BleManager to scan and get peripheral first".to_string()
+        ))
+    }
 
     async fn disconnect(&mut self) -> Result<(), TransportError> {
-        if let Some(peripheral) = self.peripheral.lock().await.take() {
+        // Cancel notification task
+        if let Some(task) = self.notification_task.take() {
+            task.abort();
+        }
+        self.notification_receiver = None;
+
+        if let Some(peripheral) = self.peripheral.take() {
             peripheral.disconnect()
                 .await
                 .map_err(|e| TransportError::ConnectionFailed(format!("Failed to disconnect: {}", e)))?;
         }
 
-        *self.write_char.lock().await = None;
-        *self.notify_char.lock().await = None;
+        self.write_char = None;
+        self.notify_char = None;
         self.connected = false;
 
         Ok(())
@@ -196,13 +276,13 @@ impl Transport for BleTransport {
             return Err(TransportError::NotConnected);
         }
 
-        let peripheral = self.peripheral.lock().await.clone()
+        let peripheral = self.peripheral.as_ref()
             .ok_or(TransportError::NotConnected)?;
 
-        let write_char = self.write_char.lock().await.clone()
+        let write_char = self.write_char.as_ref()
             .ok_or(TransportError::NotConnected)?;
 
-        peripheral.write(&write_char, data, btleplug::api::WriteType::WithoutResponse)
+        peripheral.write(write_char, data, btleplug::api::WriteType::WithResponse)
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))?;
 
@@ -214,30 +294,13 @@ impl Transport for BleTransport {
             return Err(TransportError::NotConnected);
         }
 
-        let peripheral = self.peripheral.lock().await.clone()
-            .ok_or(TransportError::NotConnected)?;
-
-        let notify_char = self.notify_char.lock().await.clone()
+        let receiver = self.notification_receiver.as_mut()
             .ok_or(TransportError::NotConnected)?;
 
         // Wait for notification with timeout
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            peripheral.notifications()
-        ).await {
-            Ok(Ok(mut stream)) => {
-                use futures::StreamExt;
-                if let Some(notification) = stream.next().await {
-                    if notification.uuid == notify_char.uuid {
-                        Ok(notification.value)
-                    } else {
-                        Err(TransportError::ReceiveFailed("Received notification from wrong characteristic".to_string()))
-                    }
-                } else {
-                    Err(TransportError::ReceiveFailed("Notification stream ended".to_string()))
-                }
-            }
-            Ok(Err(e)) => Err(TransportError::ReceiveFailed(e.to_string())),
+        match tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await {
+            Ok(Some(data)) => Ok(data),
+            Ok(None) => Err(TransportError::ReceiveFailed("Notification stream ended".to_string())),
             Err(_) => Err(TransportError::Timeout),
         }
     }

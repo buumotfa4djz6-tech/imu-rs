@@ -52,6 +52,27 @@ impl<T: Transport> Device<T> {
         transport.is_connected()
     }
 
+    /// Try to receive sensor data (non-blocking, returns None if no data available)
+    pub async fn try_receive_data(&self) -> Result<Option<imu_core::ImuReading>, DeviceError> {
+        let mut transport = self.transport.lock().await;
+        match transport.receive().await {
+            Ok(data) => {
+                let response = parse_response(&data)?;
+                if let imu_core::ImuResponse::SensorData(reading) = response {
+                    Ok(Some(reading))
+                } else {
+                    // Received a non-data response (e.g., command ack)
+                    Ok(None)
+                }
+            }
+            Err(TransportError::Timeout) | Err(TransportError::ReceiveFailed(_)) => {
+                // No data available or read error, return None
+                Ok(None)
+            }
+            Err(e) => Err(DeviceError::Transport(e)),
+        }
+    }
+
     /// Send a command and wait for the matching response
     pub async fn send_command(&self, cmd: &ImuCommand) -> Result<ImuResponse, DeviceError> {
         let expected_tag = Self::expected_response_tag(cmd);

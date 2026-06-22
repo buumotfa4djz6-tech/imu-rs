@@ -1,7 +1,9 @@
 use eframe::egui;
-use imu_transport::{BleTransport, BleDeviceInfo, list_serial_ports};
+use imu_transport::{BleTransport, BleDeviceInfo, BleManager, list_serial_ports, SerialTransport, Device};
 use imu_core::ImuReading;
 use std::collections::VecDeque;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex as TokioMutex};
 
 /// Connection type
 #[derive(Debug, Clone, PartialEq)]
@@ -10,11 +12,50 @@ enum ConnectionType {
     Ble,
 }
 
+/// Connected device (holds the actual transport)
+enum ConnectedDevice {
+    Serial(Device<SerialTransport>),
+    Ble(Device<BleTransport>),
+}
+
+/// Commands that can be sent to the background task
+enum DeviceCommand {
+    Connect(ConnectionParams),
+    Disconnect,
+    SetConfig(DeviceConfig),
+    Calibrate(CalibrationType),
+}
+
+enum ConnectionParams {
+    Serial { port: String, baud_rate: u32 },
+    Ble { address: String },
+}
+
+#[derive(Debug, Clone)]
+struct DeviceConfig {
+    report_rate: u16,
+    accel_range: u8,
+    gyro_range: u8,
+    mag_range: u8,
+    filter_level: u8,
+}
+
+#[derive(Debug, Clone)]
+enum CalibrationType {
+    Accelerometer,
+    Gyroscope,
+    Magnetometer,
+}
+
 /// Application state
 struct ImuApp {
     // Connection state
     connection_type: ConnectionType,
     is_connected: bool,
+    
+    // Channels for async communication
+    data_rx: Option<mpsc::Receiver<ImuReading>>,
+    command_tx: Option<mpsc::Sender<DeviceCommand>>,
     
     // Serial port state
     serial_ports: Vec<String>,
@@ -22,6 +63,7 @@ struct ImuApp {
     baud_rate: u32,
     
     // BLE state
+    ble_manager: Option<Arc<TokioMutex<BleManager>>>,
     ble_devices: Vec<BleDeviceInfo>,
     selected_ble_device: Option<String>,
     scanning_ble: bool,
@@ -41,7 +83,6 @@ struct ImuApp {
     last_timestamp: u32,
     
     // Configuration (Slice 8)
-    show_config_panel: bool,
     config_report_rate: u16,
     config_accel_range: u8,
     config_gyro_range: u8,
@@ -61,9 +102,12 @@ impl Default for ImuApp {
         Self {
             connection_type: ConnectionType::Serial,
             is_connected: false,
+            data_rx: None,
+            command_tx: None,
             serial_ports: Vec::new(),
             selected_serial_port: None,
             baud_rate: 115200,
+            ble_manager: None,
             ble_devices: Vec::new(),
             selected_ble_device: None,
             scanning_ble: false,
@@ -75,7 +119,6 @@ impl Default for ImuApp {
             mag_buffer: VecDeque::with_capacity(1000),
             data_buffer_len: 1000,
             last_timestamp: 0,
-            show_config_panel: false,
             config_report_rate: 100,
             config_accel_range: 2,
             config_gyro_range: 4,
@@ -91,6 +134,88 @@ impl Default for ImuApp {
 }
 
 impl ImuApp {
+    /// Background task that handles all device communication
+    async fn background_task<T: imu_transport::Transport + 'static>(
+        device: Device<T>,
+        mut command_rx: mpsc::Receiver<DeviceCommand>,
+        data_tx: mpsc::Sender<ImuReading>,
+    ) {
+        use imu_core::ImuCommand;
+        
+        loop {
+            // Wait for a command or timeout to check for data
+            tokio::select! {
+                Some(cmd) = command_rx.recv() => {
+                    match cmd {
+                        DeviceCommand::Connect(_params) => {
+                            if let Err(e) = device.connect().await {
+                                eprintln!("Connect failed: {}", e);
+                            }
+                        }
+                        DeviceCommand::Disconnect => {
+                            if let Err(e) = device.disconnect().await {
+                                eprintln!("Disconnect failed: {}", e);
+                            }
+                            break;
+                        }
+                        DeviceCommand::SetConfig(config) => {
+                            use imu_core::SetParamsCmd;
+                            
+                            let params = SetParamsCmd {
+                                still_threshold: 5,
+                                still_zero_speed: 255,
+                                move_zero_speed: 0,
+                                compass_on: true,
+                                barometer_filter: config.filter_level.min(3),
+                                fps: config.report_rate.min(255) as u8,
+                                gyro_filter: config.filter_level.min(255),
+                                accel_filter: config.filter_level.min(255),
+                                compass_filter: config.filter_level.min(255),
+                                subscription_tag: 0x0FFF, // Enable all channels
+                            };
+                            
+                            let cmd = ImuCommand::SetParams(params);
+                            if let Err(e) = device.send_command(&cmd).await {
+                                eprintln!("SetConfig failed: {}", e);
+                            }
+                        }
+                        DeviceCommand::Calibrate(cal_type) => {
+                            let cmd = match cal_type {
+                                CalibrationType::Accelerometer => ImuCommand::SimpleAccelCalibration,
+                                CalibrationType::Gyroscope => ImuCommand::ZeroWorldXYZ,
+                                CalibrationType::Magnetometer => ImuCommand::StopCompassCalibration,
+                            };
+                            if let Err(e) = device.send_command(&cmd).await {
+                                eprintln!("Calibrate failed: {}", e);
+                            }
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {
+                    // Try to receive data
+                    match device.try_receive_data().await {
+                        Ok(Some(reading)) => {
+                            // Custom backpressure: if channel is full, drop oldest
+                            if data_tx.capacity() == 0 {
+                                // Channel is full, we can't drop from receiver side
+                                // Just skip this reading
+                            }
+                            if data_tx.try_send(reading).is_err() {
+                                // Channel full or closed, skip this reading
+                            }
+                        }
+                        Ok(None) => {
+                            // No data or non-data response
+                        }
+                        Err(e) => {
+                            eprintln!("Receive error: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Refresh serial port list
     fn refresh_serial_ports(&mut self) {
         self.serial_ports = list_serial_ports()
@@ -105,14 +230,37 @@ impl ImuApp {
         self.scanning_ble = true;
         self.status_message = "Scanning for BLE devices...".to_string();
         
-        // Perform synchronous scan
-        match self.rt.block_on(BleTransport::discover_devices()) {
-            Ok(devices) => {
-                self.ble_devices = devices;
-                self.status_message = format!("Found {} BLE device(s)", self.ble_devices.len());
+        // Initialize BLE manager if not already done
+        if self.ble_manager.is_none() {
+            match self.rt.block_on(async {
+                let mut manager = BleManager::new();
+                manager.init().await?;
+                Ok::<_, imu_transport::TransportError>(manager)
+            }) {
+                Ok(manager) => {
+                    self.ble_manager = Some(Arc::new(TokioMutex::new(manager)));
+                }
+                Err(e) => {
+                    self.status_message = format!("BLE init error: {}", e);
+                    self.scanning_ble = false;
+                    return;
+                }
             }
-            Err(e) => {
-                self.status_message = format!("BLE scan error: {}", e);
+        }
+        
+        // Perform scan
+        if let Some(manager) = &self.ble_manager {
+            let manager_clone = manager.clone();
+            match self.rt.block_on(async {
+                manager_clone.lock().await.scan(3).await
+            }) {
+                Ok(devices) => {
+                    self.ble_devices = devices;
+                    self.status_message = format!("Found {} BLE device(s)", self.ble_devices.len());
+                }
+                Err(e) => {
+                    self.status_message = format!("BLE scan error: {}", e);
+                }
             }
         }
         
@@ -123,33 +271,110 @@ impl ImuApp {
     fn connect(&mut self) {
         match self.connection_type {
             ConnectionType::Serial => {
-                if let Some(port) = &self.selected_serial_port {
-                    self.status_message = format!("Connecting to {}...", port);
-                    // TODO: Implement actual connection
+                if let Some(port_name) = self.selected_serial_port.clone() {
+                    self.status_message = format!("Connecting to {}...", port_name);
+                    
+                    // Create channels
+                    let (command_tx, command_rx) = mpsc::channel::<DeviceCommand>(32);
+                    let (data_tx, data_rx) = mpsc::channel::<ImuReading>(100);
+                    
+                    // Create transport and device
+                    let transport = SerialTransport::new(&port_name, self.baud_rate);
+                    let device = Device::new(transport);
+                    
+                    // Spawn background task
+                    let rt = self.rt.handle().clone();
+                    rt.spawn(async move {
+                        Self::background_task(device, command_rx, data_tx).await;
+                    });
+                    
+                    // Send connect command
+                    self.rt.block_on(command_tx.send(DeviceCommand::Connect(ConnectionParams::Serial {
+                        port: port_name.clone(),
+                        baud_rate: self.baud_rate,
+                    }))).unwrap();
+                    
+                    // Store state
+                    self.command_tx = Some(command_tx);
+                    self.data_rx = Some(data_rx);
                     self.is_connected = true;
-                    self.status_message = format!("Connected to {}", port);
+                    self.status_message = format!("Connected to {}", port_name);
                 } else {
                     self.status_message = "Please select a serial port".to_string();
                 }
             }
-            ConnectionType::Ble => {
-                if let Some(device) = &self.selected_ble_device {
-                    self.status_message = format!("Connecting to {}...", device);
-                    // TODO: Implement actual connection
-                    self.is_connected = true;
-                    self.status_message = format!("Connected to {}", device);
-                } else {
-                    self.status_message = "Please select a BLE device".to_string();
+                ConnectionType::Ble => {
+                    if let Some(device_addr) = self.selected_ble_device.clone() {
+                        self.status_message = format!("Connecting to {}...", device_addr);
+                        
+                        // Check if we have a BLE manager
+                        if let Some(manager) = &self.ble_manager {
+                            // Get the peripheral from manager
+                            let manager_clone = manager.clone();
+                            let addr_clone = device_addr.clone();
+                            
+                            match self.rt.block_on(async {
+                                let mgr = manager_clone.lock().await;
+                                mgr.get_peripheral(&addr_clone).await
+                            }) {
+                                Some(peripheral) => {
+                                    // Create channels
+                                    let (command_tx, command_rx) = mpsc::channel::<DeviceCommand>(32);
+                                    let (data_tx, data_rx) = mpsc::channel::<ImuReading>(100);
+                                    
+                                    // Create transport and device
+                                    let mut transport = BleTransport::new(&device_addr);
+                                    
+                                    // Connect using the peripheral
+                                    match self.rt.block_on(transport.connect_with_peripheral(peripheral)) {
+                                        Ok(()) => {
+                                            let device = Device::new(transport);
+                                            
+                                            // Spawn background task
+                                            let rt = self.rt.handle().clone();
+                                            rt.spawn(async move {
+                                                Self::background_task(device, command_rx, data_tx).await;
+                                            });
+                                            
+                                            // Store state
+                                            self.command_tx = Some(command_tx);
+                                            self.data_rx = Some(data_rx);
+                                            self.is_connected = true;
+                                            self.status_message = format!("Connected to {}", device_addr);
+                                        }
+                                        Err(e) => {
+                                            self.status_message = format!("BLE connect error: {}", e);
+                                        }
+                                    }
+                                }
+                                None => {
+                                    self.status_message = "BLE device not found. Please scan again.".to_string();
+                                }
+                            }
+                        } else {
+                            self.status_message = "BLE manager not initialized. Please scan first.".to_string();
+                        }
+                    } else {
+                        self.status_message = "Please select a BLE device".to_string();
+                    }
                 }
-            }
         }
     }
 
     /// Disconnect from device
     fn disconnect(&mut self) {
+        // Send disconnect command to background task
+        if let Some(command_tx) = &self.command_tx {
+            let _ = self.rt.block_on(command_tx.send(DeviceCommand::Disconnect));
+        }
+        
+        // Clear state
+        self.command_tx = None;
+        self.data_rx = None;
         self.is_connected = false;
         self.status_message = "Disconnected".to_string();
         self.battery_level = None;
+        
         // Clear data buffers
         self.accel_buffer.clear();
         self.gyro_buffer.clear();
@@ -193,23 +418,43 @@ impl ImuApp {
     pub fn start_accel_calibration(&mut self) {
         self.calibrating_accel = true;
         self.calibration_status = "Accelerometer calibration in progress...".to_string();
-        // In a real implementation, this would send a calibration command to the device
-        // For now, just simulate the process
+        
+        if let Some(command_tx) = &self.command_tx {
+            let _ = self.rt.block_on(command_tx.send(DeviceCommand::Calibrate(CalibrationType::Accelerometer)));
+        }
     }
     
     pub fn start_gyro_calibration(&mut self) {
         self.calibrating_gyro = true;
         self.calibration_status = "Gyroscope calibration in progress...".to_string();
-        // In a real implementation, this would send a calibration command to the device
+        
+        if let Some(command_tx) = &self.command_tx {
+            let _ = self.rt.block_on(command_tx.send(DeviceCommand::Calibrate(CalibrationType::Gyroscope)));
+        }
     }
     
     pub fn start_mag_calibration(&mut self) {
         self.calibrating_mag = true;
         self.calibration_status = "Magnetometer calibration in progress...".to_string();
-        // In a real implementation, this would send a calibration command to the device
+        
+        if let Some(command_tx) = &self.command_tx {
+            let _ = self.rt.block_on(command_tx.send(DeviceCommand::Calibrate(CalibrationType::Magnetometer)));
+        }
     }
     
     pub fn apply_configuration(&mut self) {
+        let config = DeviceConfig {
+            report_rate: self.config_report_rate,
+            accel_range: self.config_accel_range,
+            gyro_range: self.config_gyro_range,
+            mag_range: self.config_mag_range,
+            filter_level: self.config_filter_level,
+        };
+        
+        if let Some(command_tx) = &self.command_tx {
+            let _ = self.rt.block_on(command_tx.send(DeviceCommand::SetConfig(config)));
+        }
+        
         self.config_modified = false;
         self.status_message = format!(
             "Configuration applied: {}Hz, Accel:{}G, Gyro:{}°/s, Mag:{}Gauss",
@@ -218,7 +463,6 @@ impl ImuApp {
             self.config_gyro_range,
             self.config_mag_range
         );
-        // In a real implementation, this would send configuration commands to the device
     }
     
     pub fn save_configuration(&self) {
@@ -257,6 +501,17 @@ impl ImuApp {
 
 impl eframe::App for ImuApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Consume data from channel (non-blocking)
+        let mut readings_to_process = Vec::new();
+        if let Some(data_rx) = &mut self.data_rx {
+            while let Ok(reading) = data_rx.try_recv() {
+                readings_to_process.push(reading);
+            }
+        }
+        for reading in readings_to_process {
+            self.process_imu_reading(&reading);
+        }
+        
         // Top menu bar
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
