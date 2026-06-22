@@ -2,8 +2,9 @@ use crate::transport::{Transport, TransportError};
 use async_trait::async_trait;
 use btleplug::api::{Central, Characteristic, Manager as _, Peripheral as _, ScanFilter};
 use btleplug::platform::{Adapter, Manager, Peripheral};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
@@ -18,12 +19,26 @@ pub struct BleDeviceInfo {
     pub name: Option<String>,
     pub address: String,
     pub rssi: Option<i16>,
+    pub last_seen: Instant,
+}
+
+/// BLE discovery event
+#[derive(Debug, Clone)]
+pub enum BleDeviceEvent {
+    Discovered(BleDeviceInfo),
+    Lost(String), // MAC address
 }
 
 /// Global BLE manager to handle scanning and connection
 pub struct BleManager {
     central: Option<Adapter>,
     discovered_peripherals: Arc<Mutex<Vec<Peripheral>>>,
+}
+
+impl Default for BleManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BleManager {
@@ -93,19 +108,22 @@ impl BleManager {
                 // Only include devices that have the IM948 service
                 let has_im948_service = props.services.iter().any(|uuid| uuid.to_string() == IM948_SERVICE_UUID);
                 
-                if has_im948_service {
-                    let name = props.local_name.clone();
-                    let address = props.address.to_string();
-                    let rssi = props.rssi;
-
-                    devices.push(BleDeviceInfo {
-                        name,
-                        address,
-                        rssi,
-                    });
-
-                    discovered_list.push(peripheral);
+                if !has_im948_service {
+                    continue;
                 }
+                
+                let name = props.local_name.clone();
+                let address = props.address.to_string();
+                let rssi = props.rssi;
+
+                devices.push(BleDeviceInfo {
+                    name,
+                    address,
+                    rssi,
+                    last_seen: Instant::now(),
+                });
+
+                discovered_list.push(peripheral);
             }
         }
 
@@ -120,6 +138,123 @@ impl BleManager {
             }
         }
         None
+    }
+
+    /// Start continuous BLE device discovery with streaming events.
+    /// Returns a receiver for BleDeviceEvent (Discovered/Lost).
+    /// Sends a stop signal via the returned StopHandle to end discovery.
+    pub async fn start_discovery(
+        &self,
+    ) -> Result<(mpsc::Receiver<BleDeviceEvent>, tokio::sync::oneshot::Sender<()>), TransportError> {
+        let central = self.central.as_ref()
+            .ok_or_else(|| TransportError::ConnectionFailed("BLE manager not initialized".to_string()))?;
+
+        let (event_tx, event_rx) = mpsc::channel(32);
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+
+        // Clone what we need for the background task
+        let central_clone = central.clone();
+        let known_peripherals = self.discovered_peripherals.clone();
+
+        // Spawn background task for continuous scanning
+        tokio::spawn(async move {
+            let mut known_devices: HashMap<String, BleDeviceInfo> = HashMap::new();
+            let scan_interval = Duration::from_secs(3);
+            let device_timeout = Duration::from_secs(10);
+
+            loop {
+                // Check if we should stop
+                if stop_rx.try_recv().is_ok() {
+                    // Stop scanning before exiting
+                    let _ = central_clone.stop_scan().await;
+                    break;
+                }
+
+                // Clear previously discovered peripherals for this scan
+                known_peripherals.lock().await.clear();
+
+                // Start scan
+                let service_uuid = Uuid::parse_str(IM948_SERVICE_UUID).unwrap();
+                if central_clone.start_scan(ScanFilter {
+                    services: vec![service_uuid],
+                }).await.is_err() {
+                    tokio::time::sleep(scan_interval).await;
+                    continue;
+                }
+
+                // Wait for scan duration
+                tokio::time::sleep(Duration::from_secs(2)).await;
+
+                // Stop scan
+                let _ = central_clone.stop_scan().await;
+
+                // Get discovered peripherals
+                let peripherals = match central_clone.peripherals().await {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                let mut current_devices: HashMap<String, BleDeviceInfo> = HashMap::new();
+                let mut discovered_list = known_peripherals.lock().await;
+
+                for peripheral in peripherals {
+                    if let Ok(Some(props)) = peripheral.properties().await {
+                        // Filter by IM948 service UUID or name
+                        let has_im948_service = props.services.iter()
+                            .any(|uuid| uuid.to_string() == IM948_SERVICE_UUID);
+                        let has_im948_name = props.local_name.as_ref()
+                            .map(|name| name.contains("IM948") || name.contains("IMU"))
+                            .unwrap_or(false);
+
+                        if has_im948_service || has_im948_name {
+                            let info = BleDeviceInfo {
+                                name: props.local_name.clone(),
+                                address: props.address.to_string(),
+                                rssi: props.rssi,
+                                last_seen: Instant::now(),
+                            };
+                            current_devices.insert(info.address.clone(), info);
+                            discovered_list.push(peripheral);
+                        }
+                    }
+                }
+                drop(discovered_list);
+
+                // Check for newly discovered devices
+                for (addr, info) in &current_devices {
+                    if !known_devices.contains_key(addr) {
+                        let _ = event_tx.send(BleDeviceEvent::Discovered(info.clone())).await;
+                    } else {
+                        // Update last_seen for known devices
+                        if let Some(known) = known_devices.get_mut(addr) {
+                            known.last_seen = info.last_seen;
+                            known.rssi = info.rssi;
+                        }
+                    }
+                }
+
+                // Check for lost devices (timeout)
+                let lost_addrs: Vec<String> = known_devices.iter()
+                    .filter(|(addr, info)| {
+                        !current_devices.contains_key(*addr) && info.last_seen.elapsed() > device_timeout
+                    })
+                    .map(|(addr, _)| addr.clone())
+                    .collect();
+
+                for addr in &lost_addrs {
+                    let _ = event_tx.send(BleDeviceEvent::Lost(addr.clone())).await;
+                    known_devices.remove(addr);
+                }
+
+                // Update known devices
+                known_devices = current_devices;
+
+                // Wait before next scan
+                tokio::time::sleep(scan_interval).await;
+            }
+        });
+
+        Ok((event_rx, stop_tx))
     }
 }
 
@@ -222,11 +357,9 @@ impl BleTransport {
 
             use futures::StreamExt;
             while let Some(notification) = notifications.next().await {
-                if notification.uuid == notify_uuid_clone {
-                    if tx.send(notification.value).await.is_err() {
-                        // Receiver dropped, stop the task
-                        break;
-                    }
+                if notification.uuid == notify_uuid_clone && tx.send(notification.value).await.is_err() {
+                    // Receiver dropped, stop the task
+                    break;
                 }
             }
         });

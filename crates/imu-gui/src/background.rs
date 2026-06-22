@@ -34,9 +34,9 @@ pub async fn background_task<T: Transport + 'static>(
                             compass_on: true,
                             barometer_filter: config.filter_level.min(3),
                             fps: config.report_rate.min(255) as u8,
-                            gyro_filter: config.filter_level.min(255),
-                            accel_filter: config.filter_level.min(255),
-                            compass_filter: config.filter_level.min(255),
+                            gyro_filter: config.filter_level,
+                            accel_filter: config.filter_level,
+                            compass_filter: config.filter_level,
                             subscription_tag: 0x0FFF, // Enable all channels
                         };
                         

@@ -16,4 +16,4 @@ pub use device::*;
 pub use serial::*;
 
 #[cfg(feature = "ble")]
-pub use ble::*;
+pub use ble::{BleTransport, BleDeviceInfo, BleDeviceEvent, BleManager};

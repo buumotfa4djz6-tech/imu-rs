@@ -1,5 +1,5 @@
 use eframe::egui;
-use imu_transport::{BleManager, BleTransport, Device, SerialTransport, list_serial_ports};
+use imu_transport::{BleDeviceEvent, BleManager, BleTransport, Device, SerialTransport, list_serial_ports};
 use std::sync::Arc;
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 
@@ -17,8 +17,8 @@ impl ImuApp {
         self.status_message = format!("Found {} serial port(s)", self.serial_ports.len());
     }
 
-    /// Scan for BLE devices
-    pub fn scan_ble_devices(&mut self, _ctx: &egui::Context) {
+    /// Start continuous BLE discovery
+    pub fn start_ble_discovery(&mut self, _ctx: &egui::Context) {
         self.scanning_ble = true;
         self.status_message = "Scanning for BLE devices...".to_string();
         
@@ -40,23 +40,52 @@ impl ImuApp {
             }
         }
         
-        // Perform scan
+        // Start streaming discovery
         if let Some(manager) = &self.ble_manager {
             let manager_clone = manager.clone();
             match self.rt.block_on(async {
-                manager_clone.lock().await.scan(3).await
+                manager_clone.lock().await.start_discovery().await
             }) {
-                Ok(devices) => {
-                    self.ble_devices = devices;
-                    self.status_message = format!("Found {} BLE device(s)", self.ble_devices.len());
+                Ok((event_rx, stop_tx)) => {
+                    self.ble_discovery_rx = Some(event_rx);
+                    self.ble_stop_tx = Some(stop_tx);
+                    self.ble_devices.clear();
                 }
                 Err(e) => {
-                    self.status_message = format!("BLE scan error: {}", e);
+                    self.status_message = format!("BLE discovery error: {}", e);
+                    self.scanning_ble = false;
                 }
             }
         }
-        
+    }
+
+    /// Stop BLE discovery
+    pub fn stop_ble_discovery(&mut self) {
+        if let Some(stop_tx) = self.ble_stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+        self.ble_discovery_rx = None;
         self.scanning_ble = false;
+        self.status_message = "BLE scan stopped".to_string();
+    }
+
+    /// Poll BLE discovery events (non-blocking)
+    pub fn poll_ble_discovery_events(&mut self) {
+        if let Some(rx) = &mut self.ble_discovery_rx {
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    BleDeviceEvent::Discovered(info) => {
+                        self.ble_devices.insert(info.address.clone(), info);
+                    }
+                    BleDeviceEvent::Lost(addr) => {
+                        self.ble_devices.remove(&addr);
+                        if self.selected_ble_device.as_deref() == Some(&addr) {
+                            self.selected_ble_device = None;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Connect to selected device

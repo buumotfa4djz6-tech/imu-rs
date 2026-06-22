@@ -7,6 +7,9 @@ use crate::state::ImuApp;
 
 impl eframe::App for ImuApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll BLE discovery events (non-blocking)
+        self.poll_ble_discovery_events();
+        
         // Consume data from channel (non-blocking)
         let mut readings_to_process = Vec::new();
         if let Some(data_rx) = &mut self.data_rx {
